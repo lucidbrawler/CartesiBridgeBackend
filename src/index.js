@@ -1,7 +1,5 @@
-// dapp/src/index.js — UPDATED FOR PDAI + ETH DEPOSIT FIX WITH ETHER LIBRARY PROCESSING
-// WITHDRAWAL CODE UPDATED - DEC 2025: Manual voucher encoding for ETH withdrawal to ensure trustless execution without library dependencies.
+console.log("WITHDRAWAL CODE UPDATED - DEC of the cartesi dapp 2025 withdraw errors 1.9 0x5fd8c710  manual withdraw + cartesi guy's keccak "); // Tag to confirm new code loaded
 
-console.log("WITHDRAWAL CODE UPDATED - DEC of the cartesi dapp 2025 withdraw errors 1.1"); // Tag to confirm new code loaded
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
@@ -223,70 +221,108 @@ const handleAdvance = async (request) => {
     console.log(`Burned ${input.amount} LIQUID for ${user}`);
     return "accept";
   }
-// 7. WITHDRAW ETH — Manually encode voucher for trustless, decentralized withdrawal without relying on cartesi-wallet library
-if (input?.type === "withdraw_eth" && input.amount) {
-  const user = request.metadata.msg_sender.toLowerCase();
+  
+  // Helper: Left-pad a hex string (without '0x') to a fixed length with zeros
+  const leftPadHex = (hexStr, length) => {
+    return hexStr.padStart(length, '0');
+  };
 
-  if (!registeredUsers.has(user)) {
-    console.log("User not registered, ignoring withdrawal");
-    return "reject";
-  }
+  // 7. WITHDRAW ETH — Fully manual voucher encoding (no libraries)
+  if (input?.type === "withdraw_eth" && input.amount) {
+    const user = request.metadata.msg_sender.toLowerCase();
 
-  let amountWei;
-  try {
-    amountWei = ethers.parseEther(input.amount);  // ← Put it here: Changed from ethers.utils.parseEther to ethers.parseEther
-  } catch (e) {
-    console.error("Invalid ETH amount format:", e);
-    return "reject";
-  }
+    // if (!registeredUsers.has(user)) {
+    //   console.log("User not registered, ignoring withdrawal");
+    //   return "reject";
+    // }
 
- const amountBig = amountWei;
-
-  const vault = userVaults.get(user);
-  if (!vault || vault.eth < amountBig) {
-    console.log("Insufficient ETH balance for withdrawal");
-    return "reject";
-  }
-
-  // Deduct from vault (secure state update before voucher emission)
-  vault.eth -= amountBig;
-  userVaults.set(user, vault);
-
-  // Manually encode voucher: destination = user, payload = empty (0x), value = amount in hex wei
-  // This ensures a pure ETH transfer in a trustless manner, executed on L1 upon claim.
-  const voucher = {
-  destination: user,
-  payload: "0x",
-  value: "0x" + amountWei.toString(16)  // Fix: BigInt to hex string
-};
-  // Emit the voucher to the rollup server for decentralized execution
-  try {
-    const response = await fetch(`${rollupServer}/voucher`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(voucher),
-    });
-
-    if (response.ok) {
-      console.log(`Voucher emitted successfully for ${formatEther(amountBig)} ETH to ${user}`);
-    } else {
-      console.error("Voucher emission failed with status:", response.status);
-      // Note: In production, consider reverting state on failure, but since advance is atomic, reject earlier if needed.
+    if (!dAppAddress) {
+      console.log("dApp address not relayed yet, cannot withdraw");
+      return "reject";
     }
-  } catch (e) {
-    console.error("Error emitting voucher:", e);
+
+    let amountWei;
+    try {
+      // Manual parseEther equivalent: Handle decimal string to BigInt wei
+      const parts = input.amount.split('.');
+      if (parts.length > 2) throw new Error("Invalid amount");
+      let integerPart = BigInt(parts[0] || 0);
+      let fractionalPart = parts[1] ? BigInt(parts[1].padEnd(18, '0').slice(0, 18)) : 0n;
+      amountWei = integerPart * 1000000000000000000n + fractionalPart;
+      if (amountWei <= 0n) throw new Error("Amount must be positive");
+    } catch (e) {
+      console.error("Invalid ETH amount format:", e);
+      return "reject";
+    }
+
+    const amountBig = amountWei;
+
+    const vault = userVaults.get(user);
+    if (!vault || vault.eth < amountBig) {
+      console.log("Insufficient ETH balance for withdrawal");
+      return "reject";
+    }
+
+    console.log(`Processing withdrawal of ${formatEther(amountBig)} ETH for ${user}`);
+    console.log("Vault ETH balance before withdrawal:", formatEther(vault.eth));
+    // Deduct from vault
+    vault.eth -= amountBig;
+    userVaults.set(user, vault);
+
+    console.log("Vault ETH balance after deduction:", formatEther(vault.eth));
+
+    // Manual ABI encoding for withdrawEther(address,uint256)
+    const withdrawEtherSelector = "0x522f6815";
+    const userHex = user.slice(2); // Remove '0x'
+    const paddedUser = leftPadHex(userHex, 64); // Pad to 32 bytes (64 hex)
+    const amountHex = amountWei.toString(16);
+    const paddedAmount = leftPadHex(amountHex, 64); // Pad to 32 bytes (64 hex)
+
+    const payloadWithout0x = withdrawEtherSelector.slice(2) + paddedUser + paddedAmount; // Concat (remove selector's '0x')
+    const payload = "0x" + payloadWithout0x;
+
+    // Voucher with correct fields only
+    const voucher = {
+      destination: dAppAddress,
+      payload: payload
+    };
+
+    // Emit the voucher
+    try {
+      const response = await fetch(`${rollupServer}/voucher`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(voucher),
+      });
+
+      if (!response.ok) {
+        // Revert state on failure
+        vault.eth += amountBig;
+        userVaults.set(user, vault);
+        console.error("Voucher emission failed with status:", response.status);
+        return "reject";
+      }
+
+      console.log(`Voucher emitted successfully for ${formatEther(amountBig)} ETH to ${user}`);
+    } catch (e) {
+      // Revert on error
+      vault.eth += amountBig;
+      userVaults.set(user, vault);
+      console.error("Error emitting voucher:", e);
+      return "reject";
+    }
+
+    // Send notice
+    await sendNotice(stringToHex(JSON.stringify({
+      type: "eth_withdrawn",
+      user,
+      amount: formatEther(amountBig)
+    })));
+
+    console.log(`*** ETH WITHDRAWAL PROCESSED: ${formatEther(amountBig)} ETH → ${user} ***`);
+    return "accept";
   }
 
-  // Send notice for frontend update (maintains decentralization by not relying on centralized polling)
-  await sendNotice(stringToHex(JSON.stringify({
-    type: "eth_withdrawn",
-    user,
-    amount: formatEther(amountBig)
-  })));
-
-  console.log(`*** ETH WITHDRAWAL PROCESSED: ${formatEther(amountBig)} ETH → ${user} ***`);
-  return "accept";
-}
   return "accept";
 };
 
