@@ -1,4 +1,4 @@
-console.log("MERGED WITHDRAWAL CODE 1234 - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added"); // Tag to confirm merged code loaded
+console.log("MERGED WITHDRAWAL CODE 1234.2 - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added+correct sublock validation"); // Tag to confirm merged code loaded
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
@@ -329,7 +329,7 @@ const handleAdvance = async (request) => {
     const subLock = subLocks.get(subAddress) || { locked: false, owner: input.recipient, proof: null };
     if (!subLock.locked) {
       // Validate: Use proof if present, else condition (for merged test logic)
-      const isValid = proof ? true : (condition === "true"); // Add real proof validation if needed
+     const isValid = proof ? (proof.transaction && proof.transaction.toAddress.toLowerCase() === subAddress.toLowerCase()) : (condition === "true"); // Add real proof validation if needed
       if (isValid) {
         subLock.locked = true;
         subLock.proof = proof || null;
