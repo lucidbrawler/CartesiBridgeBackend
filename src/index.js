@@ -1,4 +1,4 @@
-console.log("MERGED WITHDRAWAL CODE - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added"); // Tag to confirm merged code loaded
+console.log("MERGED WITHDRAWAL CODE 1234 - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added"); // Tag to confirm merged code loaded
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
