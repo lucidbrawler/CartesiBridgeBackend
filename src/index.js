@@ -1,35 +1,33 @@
-// index.js
-console.log("MERGED WITHDRAWAL CODE 1234.6 zk hogwallet 777.6 real vault wallet(with logs-goosehelp.2-verified)= generator called from javasript sub_unlock - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch"); // Updated tag for USDC switch
+console.log("MERGED WITHDRAWAL CODE bigInit 1234.6 zk hogwallet 777.6 real vault wallet(with logs-goosehelp.2-verified)= generator called from javasript sub_unlock - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch - ETH MODULE REFACTORED");
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
 const { stringToHex, hexToString } = require("viem");
-const { parseEther } = require("ethers");
-const wallet = new Wallet(); // Keep original instantiation (no balances Map needed unless required; tested compatible)
+const wallet = new Wallet();
 
 // === TOKEN ADDRESSES (Sepolia example — change if needed) ===
-const WWART_ADDRESS = "0xYourWWARTContractHere"; // Replace or leave as-is if not used yet
+const WWART_ADDRESS = "0xYourWWARTContractHere";
 const CTSI_ADDRESS = "0xae7f61eCf06C65405560166b259C54031428A9C4";
 const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"; // Real Sepolia USDC (6 decimals)
 
 // === PORTAL ADDRESSES (Sepolia) ===
-const EtherPortal = "0xFfdbe43d4c855BF7e0f105c400A50857f53AB044";
-const ERC20Portal = "0x4b088b2dee4d3c6ec7aa5fb4e6cd8e9f0a1b2c3d";
-const dAppAddressRelay = "0xF5DE34d6BbC0446E2a45719E718efEbaaE179daE";
+const EtherPortal = "0xFfdbe43d4c855BF7e0f105c400A50857f53AB044".toLowerCase();
+const ERC20Portal = "0x4b088b2dee4d3c6ec7aa5fb4e6cd8e9f0a1b2c3d".toLowerCase();
+const dAppAddressRelay = "0xF5DE34d6BbC0446E2a45719E718efEbaaE179daE".toLowerCase();
 
 // === GLOBAL STATE ===
-const userVaults = new Map();           // address → vault object
-let registeredUsers = new Map();        // address → true
+const userVaults = new Map();
+let registeredUsers = new Map();
 let dAppAddress = "";
-let subLocks = new Map(); // NEW: subAddress → {locked: boolean, owner: string, proof: any, minted: bigint, vaultAddress: string} for test lock/unlock
-let pendingLocks = new Map(); // subAddress → {owner, proof, vaultAddress, mintedAmount, depositTxHash}
-const userMintHistories = new Map(); // user (owner) => array of {amount: bigint, subAddress: string, timestamp: number, txHash: string}
-const userBurnHistories = new Map(); // user (owner) => array of {amount: bigint, subAddress: string, timestamp: number}
+let subLocks = new Map();
+let pendingLocks = new Map();
+const userMintHistories = new Map();
+const userBurnHistories = new Map();
 
 const rollupServer = process.env.ROLLUP_HTTP_SERVER_URL;
 console.log("HTTP rollup_server url:", rollupServer);
 
-// Helper: send a notice
+// Helpers
 const sendNotice = async (payload) => {
   try {
     await fetch(`${rollupServer}/notice`, {
@@ -42,7 +40,6 @@ const sendNotice = async (payload) => {
   }
 };
 
-// Helper: send a report (used in inspect)
 const sendReport = async (payload) => {
   try {
     await fetch(`${rollupServer}/report`, {
@@ -60,8 +57,96 @@ const formatEther = (wei) => {
   const str = wei.toString();
   const integerPart = str.length > 18 ? str.slice(0, str.length - 18) : "0";
   let fractionalPart = str.length > 18 ? str.slice(str.length - 18) : "0".repeat(18 - str.length) + str;
-  fractionalPart = fractionalPart.replace(/0+$/, "");  // Remove trailing zeros
+  fractionalPart = fractionalPart.replace(/0+$/, "");
   return fractionalPart ? `${integerPart}.${fractionalPart}` : integerPart;
+};
+
+// =============================================================================
+// ETH MODULE ──────────────────────────────────────────────────────────────────
+// All ETH deposit / withdraw logic lives here
+// =============================================================================
+
+const ETH = {
+  PORTAL_ADDRESS: EtherPortal,
+
+  WITHDRAW_SELECTOR: "0x522f6815",          // withdrawEther(address to, uint256 amount)
+
+  // ─── Deposit handling ─────────────────────────────────────────────────────
+  parseDepositPayload(payload) {
+    if (typeof payload !== 'string' || !payload.startsWith('0x') || payload.length !== 106) {
+      console.log("ETH deposit payload has unexpected length/format");
+      return null;
+    }
+
+    try {
+      const data = payload.slice(2);
+      const depositor = "0x" + data.slice(0, 40).toLowerCase();
+      const amountHex = "0x" + data.slice(40);
+      const amountWei = BigInt(amountHex);
+
+      if (amountWei <= 0n || depositor === "0x0000000000000000000000000000000000000000") {
+        return null;
+      }
+
+      return { depositor, amountWei };
+    } catch (err) {
+      console.error("ETH deposit payload parsing error:", err);
+      return null;
+    }
+  },
+
+  creditToVault(vaults, depositor, amountWei) {
+    let vault = vaults.get(depositor) || {
+      liquid: 0n,
+      wWART: 0n,
+      CTSI: 0n,
+      usdc: 0n,
+      eth: 0n,
+      spoofedMinted: 0n,
+      spoofedBurned: 0n
+    };
+    vault.eth += amountWei;
+    vaults.set(depositor, vault);
+  },
+
+  createDepositNotice(depositor, amountWei) {
+    const vault = userVaults.get(depositor);
+    return {
+      type: "eth_deposited",
+      user: depositor,
+      amount: amountWei.toString(),
+      newBalance: vault?.eth.toString() ?? "0"
+    };
+  },
+
+  // ─── Withdrawal handling ──────────────────────────────────────────────────
+  buildWithdrawPayload(recipient, amountWei) {
+    const recipientNo0x = recipient.slice(2).padStart(64, '0');
+    const amountNo0x    = amountWei.toString(16).padStart(64, '0');
+
+    return "0x" + ETH.WITHDRAW_SELECTOR.slice(2) + recipientNo0x + amountNo0x;
+  },
+
+  async emitVoucher(destination, payload) {
+    const voucher = { destination, payload };
+    const res = await fetch(`${rollupServer}/voucher`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(voucher),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Voucher emission failed: HTTP ${res.status}`);
+    }
+  },
+
+  createWithdrawNotice(user, amountWei) {
+    return {
+      type: "eth_withdrawn",
+      user,
+      amount: formatEther(amountWei)
+    };
+  }
 };
 
 // === ADVANCE STATE HANDLER ===
@@ -76,12 +161,12 @@ const handleAdvance = async (request) => {
       input = JSON.parse(decoded);
       console.log("Parsed input:", input);
     } catch (e) {
-      console.log("Payload is not JSON (probably a portal deposit)");
+      console.log("Payload is not JSON (probably portal deposit)");
     }
   }
 
   // 1. DApp Address Relay
-  if (sender === dAppAddressRelay.toLowerCase()) {
+  if (sender === dAppAddressRelay) {
     dAppAddress = payload;
     console.log("DApp address relayed:", dAppAddress);
     return "accept";
@@ -89,7 +174,7 @@ const handleAdvance = async (request) => {
 
   // 2. USER REGISTERS THEIR ADDRESS
   if (input?.type === "register_address") {
-    const user = request.metadata.msg_sender.toLowerCase();
+    const user = sender;
     registeredUsers.set(user, true);
 
     await sendNotice(stringToHex(JSON.stringify({ type: "address_registered", user })));
@@ -97,68 +182,40 @@ const handleAdvance = async (request) => {
     return "accept";
   }
 
-  // 3. ETH DEPOSITS — Use manual parsing for proper depositor extraction
-  if (sender === EtherPortal.toLowerCase()) {
+  // 3. ETH DEPOSITS ─ using ETH module
+  if (sender === ETH.PORTAL_ADDRESS) {
     console.log("ETH PORTAL INPUT RECEIVED - PAYLOAD:", request.payload);
 
-    let amountWei = 0n;
-    let depositor = "";
-
-    try {
-      const data = request.payload.slice(2);  // Remove '0x'
-      depositor = "0x" + data.slice(0, 40).toLowerCase();
-      const amountHex = "0x" + data.slice(40);
-      amountWei = BigInt(amountHex);
-
-      console.log("Parsed depositor from payload:", depositor);
-      console.log("Parsed amount from payload:", amountWei.toString());
-    } catch (e) {
-      console.error("ETH payload parsing error:", e);
-      return "reject";  // Reject on parse failure to maintain trustless integrity
-    }
-
-    if (amountWei === 0n || depositor === "0x0000000000000000000000000000000000000000") {
+    const parsed = ETH.parseDepositPayload(request.payload);
+    if (!parsed) {
       console.log("Invalid amount or depositor — ignoring");
       return "accept";
     }
 
+    const { depositor, amountWei } = parsed;
+
     console.log(`Crediting ${formatEther(amountWei)} ETH to ${depositor}`);
 
-    let vault = userVaults.get(depositor) || {
-      liquid: 0n,
-      wWART: 0n,
-      CTSI: 0n,
-      usdc: 0n,
-      eth: 0n,
-      spoofedMinted: 0n,
-      spoofedBurned: 0n
-    };
+    ETH.creditToVault(userVaults, depositor, amountWei);
 
-    vault.eth += amountWei;
-    userVaults.set(depositor, vault);
+    const noticePayload = ETH.createDepositNotice(depositor, amountWei);
+    await sendNotice(stringToHex(JSON.stringify(noticePayload)));
 
-    await sendNotice(stringToHex(JSON.stringify({
-      type: "eth_deposited",
-      user: depositor,
-      amount: amountWei.toString(),
-      newBalance: vault.eth.toString()
-    })));
+    console.log(`*** ETH DEPOSIT CREDITED: ${formatEther(amountWei)} ETH → ${depositor} ***`);
 
     return "accept";
   }
 
-  // 4. ERC-20 DEPOSITS (wWART, CTSI, USDC)
-  if (sender === ERC20Portal.toLowerCase()) {
+  // 4. ERC-20 DEPOSITS (wWART, CTSI, USDC) ─ unchanged
+  if (sender === ERC20Portal) {
     console.log("ERC20 PORTAL INPUT RECEIVED - PAYLOAD:", request.payload);
 
-    let tokenAddress = "";
-    let depositor = "";
-    let amount = 0n;
+    let tokenAddress = "", depositor = "", amount = 0n;
 
     try {
-      const data = request.payload.slice(2);  // Remove '0x'
+      const data = request.payload.slice(2);
       tokenAddress = "0x" + data.slice(0, 40).toLowerCase();
-      depositor = "0x" + data.slice(40, 80).toLowerCase();
+      depositor    = "0x" + data.slice(40, 80).toLowerCase();
       const amountHex = "0x" + data.slice(80, 144);
       amount = BigInt(amountHex);
 
@@ -170,31 +227,20 @@ const handleAdvance = async (request) => {
       return "reject";
     }
 
-    if (amount === 0n) {
-      console.log("Invalid amount — ignoring");
-      return "accept";
-    }
+    if (amount === 0n) return "accept";
 
     let vault = userVaults.get(depositor) || {
-      liquid: 0n,
-      wWART: 0n,
-      CTSI: 0n,
-      usdc: 0n,
-      eth: 0n,
-      spoofedMinted: 0n,
-      spoofedBurned: 0n
+      liquid: 0n, wWART: 0n, CTSI: 0n, usdc: 0n, eth: 0n,
+      spoofedMinted: 0n, spoofedBurned: 0n
     };
 
     let type = "unknown";
     if (tokenAddress === WWART_ADDRESS.toLowerCase()) {
-      vault.wWART += amount;
-      type = "wwart_deposited";
+      vault.wWART += amount; type = "wwart_deposited";
     } else if (tokenAddress === CTSI_ADDRESS.toLowerCase()) {
-      vault.CTSI += amount;
-      type = "ctsi_deposited";
+      vault.CTSI += amount; type = "ctsi_deposited";
     } else if (tokenAddress === USDC_ADDRESS.toLowerCase()) {
-      vault.usdc += amount;  // Note: USDC has 6 decimals, but we store as-is
-      type = "usdc_deposited";
+      vault.usdc += amount; type = "usdc_deposited";
     } else {
       console.log("Unknown token — ignoring");
       return "accept";
@@ -214,38 +260,62 @@ const handleAdvance = async (request) => {
     return "accept";
   }
 
-  // 5. WITHDRAWALS (ETH, wWART, CTSI, USDC)
-  if (input?.type === "withdraw_eth") {
+  // 5. ETH WITHDRAWAL ─ using ETH module + manual amount parsing
+  if (input?.type === "withdraw_eth" && input.amount) {
     const user = sender;
-    const amountWei = parseEther(input.amount).toBigInt();
 
-    let vault = userVaults.get(user) || { eth: 0n };
-    if (vault.eth < amountWei) {
-      console.log("Insufficient ETH balance");
+    if (!dAppAddress) {
+      console.log("dApp address not relayed yet, cannot withdraw");
       return "reject";
     }
+
+    let amountWei;
+    try {
+      const parts = input.amount.split('.');
+      if (parts.length > 2) throw new Error("Invalid amount format");
+
+      let integerPart   = BigInt(parts[0] || "0");
+      let fractionalPart = parts[1]
+        ? BigInt(parts[1].padEnd(18, '0').slice(0, 18))
+        : 0n;
+
+      amountWei = integerPart * 1000000000000000000n + fractionalPart;
+
+      if (amountWei <= 0n) throw new Error("Amount must be positive");
+    } catch (e) {
+      console.error("Invalid ETH amount format:", e.message);
+      return "reject";
+    }
+
+    let vault = userVaults.get(user);
+    if (!vault || vault.eth < amountWei) {
+      console.log("Insufficient ETH balance for withdrawal");
+      return "reject";
+    }
+
+    console.log(`Processing withdrawal of ${formatEther(amountWei)} ETH for ${user}`);
 
     vault.eth -= amountWei;
     userVaults.set(user, vault);
 
-    // Generate voucher for ETH withdrawal
-    const voucher = wallet.new_voucher(dAppAddress, 0, stringToHex(JSON.stringify({
-      type: "eth_withdraw",
-      to: user,
-      amount: amountWei.toString()
-    })));
+    try {
+      const payload = ETH.buildWithdrawPayload(user, amountWei);
+      await ETH.emitVoucher(dAppAddress, payload);
 
-    await sendNotice(stringToHex(JSON.stringify({
-      type: "eth_withdrawn",
-      user,
-      amount: amountWei.toString(),
-      newBalance: vault.eth.toString(),
-      voucher
-    })));
+      const notice = ETH.createWithdrawNotice(user, amountWei);
+      await sendNotice(stringToHex(JSON.stringify(notice)));
 
-    return "accept";
+      console.log(`*** ETH WITHDRAWAL PROCESSED: ${formatEther(amountWei)} ETH → ${user} ***`);
+      return "accept";
+    } catch (e) {
+      vault.eth += amountWei;
+      userVaults.set(user, vault);
+      console.error("Voucher emission failed:", e.message);
+      return "reject";
+    }
   }
 
+  // ERC-20 WITHDRAWALS ─ unchanged
   if (input?.type === "withdraw_wwart") {
     const user = sender;
     const amount = BigInt(input.amount);
@@ -259,7 +329,6 @@ const handleAdvance = async (request) => {
     vault.wWART -= amount;
     userVaults.set(user, vault);
 
-    // Generate voucher for ERC20 withdrawal (wWART)
     const voucher = wallet.new_voucher(dAppAddress, 0, stringToHex(JSON.stringify({
       type: "erc20_withdraw",
       token: WWART_ADDRESS,
@@ -291,7 +360,6 @@ const handleAdvance = async (request) => {
     vault.CTSI -= amount;
     userVaults.set(user, vault);
 
-    // Generate voucher for ERC20 withdrawal (CTSI)
     const voucher = wallet.new_voucher(dAppAddress, 0, stringToHex(JSON.stringify({
       type: "erc20_withdraw",
       token: CTSI_ADDRESS,
@@ -323,7 +391,6 @@ const handleAdvance = async (request) => {
     vault.usdc -= amount;
     userVaults.set(user, vault);
 
-    // Generate voucher for ERC20 withdrawal (USDC)
     const voucher = wallet.new_voucher(dAppAddress, 0, stringToHex(JSON.stringify({
       type: "erc20_withdraw",
       token: USDC_ADDRESS,
@@ -342,7 +409,7 @@ const handleAdvance = async (request) => {
     return "accept";
   }
 
-  // NEW: sub_lock handler (test lock with spoofed mint)
+  // SUBWALLET / LOCK / UNLOCK LOGIC ─ unchanged
   if (input?.type === "sub_lock") {
     console.log("Processing sub_lock input:", input);
 
@@ -355,16 +422,14 @@ const handleAdvance = async (request) => {
 
     const ownerLower = owner.toLowerCase();
 
-    // Validate proof (for now, just check if transaction.toAddress matches subAddress)
     const tx = proof.transaction;
     if (tx.toAddress !== subAddress || tx.amountE8 <= 0) {
       console.log("[sub_lock] Invalid proof — rejecting");
       return "reject";
     }
 
-    const mintedAmount = BigInt(tx.amountE8); // E8 units for spoofed wWART
+    const mintedAmount = BigInt(tx.amountE8);
 
-    // NEW: Real ZK proof generation via binary (in Cartesi machine)
     const { exec } = require('child_process');
     let vaultAddress;
     try {
@@ -378,7 +443,7 @@ const handleAdvance = async (request) => {
           const outputLines = stdout.trim().split('\n');
           const derivedLine = outputLines.find(line => line.startsWith('0x'));
           if (derivedLine) {
-            resolve(derivedLine.slice(2)); // strip 0x, get 48-hex
+            resolve(derivedLine.slice(2));
           } else {
             reject(new Error('No valid ZK output'));
           }
@@ -390,7 +455,6 @@ const handleAdvance = async (request) => {
       return "reject";
     }
 
-    // Set pending lock
     pendingLocks.set(subAddress, {
       owner: ownerLower,
       proof,
@@ -399,7 +463,6 @@ const handleAdvance = async (request) => {
       depositTxHash: tx.txHash
     });
 
-    // Pending notice
     await sendNotice(stringToHex(JSON.stringify({
       type: "subwallet_pending",
       subAddress,
@@ -414,7 +477,6 @@ const handleAdvance = async (request) => {
     return "accept";
   }
 
-  // NEW: sub_unlock handler (test unlock with spoofed burn)
   if (input?.type === "sub_unlock") {
     console.log("Processing sub_unlock input:", input);
 
@@ -431,9 +493,6 @@ const handleAdvance = async (request) => {
       return "reject";
     }
 
-    // Validate proof (for now, just check if exists; in real: verify burn TX)
-    // Assuming proof is valid for burnAmt
-
     const burnedAmount = BigInt(burnAmt);
 
     if (burnedAmount > subLock.minted) {
@@ -441,7 +500,6 @@ const handleAdvance = async (request) => {
       return "reject";
     }
 
-    // Unlock and burn spoofed wWART
     subLock.locked = false;
     subLocks.set(subAddress, subLock);
 
@@ -460,7 +518,6 @@ const handleAdvance = async (request) => {
     });
     userBurnHistories.set(vaultAddress, history);
 
-    // Success notice - this is all the frontend needs
     await sendNotice(stringToHex(JSON.stringify({
       type: "subwallet_unlocked",
       subAddress,
@@ -475,7 +532,6 @@ const handleAdvance = async (request) => {
     return "accept";
   }
 
-  // NEW: sweep_lock handler
   if (input?.type === "sweep_lock") {
     console.log("Processing sweep_lock input:", input);
 
@@ -498,11 +554,8 @@ const handleAdvance = async (request) => {
       return "reject";
     }
 
-    // Assume sweep tx is confirmed since proof submitted
-    // Now complete the lock
     pendingLocks.delete(subAddress);
 
-    // Create/update vault
     let vault = userVaults.get(pending.vaultAddress) || {
       liquid: 0n,
       wWART: 0n,
@@ -517,7 +570,6 @@ const handleAdvance = async (request) => {
     vault.wWART += pending.mintedAmount;
     userVaults.set(pending.vaultAddress, vault);
 
-    // Record subLock
     subLocks.set(subAddress, {
       locked: true,
       owner: pending.owner,
@@ -526,7 +578,6 @@ const handleAdvance = async (request) => {
       vaultAddress: pending.vaultAddress
     });
 
-    // Record mint history
     const history = userMintHistories.get(pending.owner) || [];
     history.push({
       amount: pending.mintedAmount,
@@ -536,7 +587,6 @@ const handleAdvance = async (request) => {
     });
     userMintHistories.set(pending.owner, history);
 
-    // Success notice
     await sendNotice(stringToHex(JSON.stringify({
       type: "sweep_locked",
       subAddress,
@@ -552,6 +602,7 @@ const handleAdvance = async (request) => {
 
     return "accept";
   }
+
   return "accept";
 };
 
@@ -559,7 +610,6 @@ const handleAdvance = async (request) => {
 const handleInspect = async (rawPayload) => {
   console.log("INSPECT REQUEST - RAW PAYLOAD:", rawPayload || "NO PAYLOAD");
 
-  // === STEP 1: Decode the hex payload to UTF-8 string ===
   let path = "";
   if (typeof rawPayload === "string" && rawPayload.startsWith("0x")) {
     try {
@@ -570,32 +620,28 @@ const handleInspect = async (rawPayload) => {
       return "accept";
     }
   } else if (typeof rawPayload === "string") {
-    path = rawPayload; // fallback (shouldn't happen now)
+    path = rawPayload;
     console.log("PATH WAS ALREADY STRING (unusual):", path);
   } else {
     console.log("UNEXPECTED PAYLOAD TYPE:", typeof rawPayload);
     return "accept";
   }
 
-  // === STEP 2: Now work with the decoded path ===
   if (path.toLowerCase().includes("vault")) {
     console.log("VAULT INSPECT DETECTED - DECODED PATH:", path);
 
-    let address = path.toLowerCase().replace(/^\/+/, ''); // remove leading slashes
+    let address = path.toLowerCase().replace(/^\/+/, '');
 
-    // Extract address after "vault/"
     if (address.startsWith("vault/")) {
       address = address.slice(6);
     } else if (address.startsWith("vault")) {
       address = address.slice(5);
     }
 
-    // Add 0x if missing
     if (!address.startsWith("0x")) {
       address = "0x" + address;
     }
 
-    // Validate address
     if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
       console.log("INVALID ADDRESS EXTRACTED:", address);
       await sendReport(stringToHex(JSON.stringify({ error: "Invalid Ethereum address" })));
@@ -632,14 +678,13 @@ const handleInspect = async (rawPayload) => {
     }));
     await sendReport(reportPayload);
     console.log("VAULT REPORT SENT FOR:", address);
-    console.log("ETH balance in vault:", formatEther(vault.eth));
-
   } else {
     console.log("Non-vault inspect path - ignored:", path);
   }
 
   return "accept";
 };
+
 // === MAIN LOOP ===
 async function main() {
   let status = "accept";
